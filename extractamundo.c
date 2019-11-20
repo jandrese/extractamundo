@@ -195,7 +195,6 @@ int readchunk(int outfd, uint8_t* data, size_t rembytes, int* offset)
 int extractpng(uint8_t* data, size_t rembytes, char* prefix, int* count)
 {
 	int offset = 8;
-	char outname[PATH_MAX];
 	int outfd;
 
 	outfd = openoutfile(prefix, count, "png");
@@ -221,19 +220,83 @@ typedef struct jfifsegment_t
 	unsigned short length;
 } jfifsegment;
 
+typedef struct jpegsofheader_t
+{
+	uint8_t	precision;
+	uint16_t height;
+	uint16_t width;
+	uint8_t components;
+	uint8_t id;
+	uint8_t sampleres;
+	uint8_t quanttable;
+} jpegsofheader;
+
 int readsegment(int outfd, uint8_t* data, size_t rembytes, int* offset)
 {
 	jfifsegment* seg;
 
-	seg = (jfifsegment*)data + offset;
+	seg = (jfifsegment*)(data + *offset);
+
+	if ( seg->magic != 0xff )
+	{
+		printf("Segment header incorrect\n");
+		return -1;
+	}
+
+	if ( seg->app0 == 0xd8 )
+	{
+		write(outfd, data + *offset, 2);
+		*offset += 2;
+		return 0;
+	}
+
+	if ( seg->app0 == 0xd9 )
+	{
+		write(outfd, data + *offset, 2);
+		*offset += 2;
+		printf(" (%d bytes)\n", *offset);
+		return 1;
+	}
+
+	if ( (seg->app0 & 0xf0 ) == 0xc0 && (seg->app0 != 0xc4) )
+	{
+		jpegsofheader* sof;
+
+		sof = (jpegsofheader*)(data + *offset + 3);
+		printf("%d x %d", ntohs(sof->width), ntohs(sof->height));
+	}
+
+	// Unfortunately JPEG doesn't provide a way to determine the
+	// end of a Scan without doing the decode.  So we have to 
+	// just look for the EOF marker.  
+	if ( seg->app0 == 0xda )
+	{
+		int startoff = *offset;
+		for ( ; (rembytes - *offset - 1) > 0; *offset += 1 )
+		{
+			if ( data[*offset] == 0xff &&
+			     data[*offset+1] == 0xd9 )
+			{
+				write(outfd, data + startoff, *offset - startoff);
+				return 0;
+			}
+		}
+		*offset = startoff + 1;
+		fprintf(stderr, "Error: EoF reached without finding EoI marker\n");
+		return -1;
+	}
 
 
-	
+	uint16_t len = ntohs(seg->length);
+	write(outfd, data + *offset, len + 2);
+	*offset += len + 2;
+
+	return 0;	
 }
 
 int extractjfif(uint8_t* data, size_t rembytes, char* prefix, int* count)
 {
-	int offset = 2;
+	int offset = 0;
 	int outfd;
 
 	outfd = openoutfile(prefix, count, "jpg");
