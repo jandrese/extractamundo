@@ -10,6 +10,7 @@
 #include <sys/mman.h>
 #include <arpa/inet.h>
 #include "pngcrctable.h"
+#include "mp3tables.h"
 
 #define DEBUG 0
 
@@ -17,6 +18,9 @@ int openoutfile(char* prefix, int* count, char* extension)
 {
 	char outname[PATH_MAX];
 	int outfd;
+
+	if ( *count > 10 )
+		exit(0);
 
 	sprintf(outname, "%s-%04d.%s", prefix, *count, extension);
 
@@ -43,7 +47,7 @@ typedef struct riffheader_t
 	char		webp_fourcc[4];
 } riffheader;
 
-int extractwebp(uint8_t* data, size_t rembytes, char* prefix, int* count)
+int extractwebp(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 {
 	riffheader* head;
 	int outfd;
@@ -111,7 +115,7 @@ unsigned long pngcrc(unsigned char *buf, int len)
 	return update_crc(0xffffffffL, buf, len) ^ 0xffffffffL;
 }
 
-int readchunk(int outfd, uint8_t* data, size_t rembytes, int* offset)
+int readchunk(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 {
 	pngchunk* chunkheader;
 	size_t	chunklen;
@@ -192,7 +196,7 @@ int readchunk(int outfd, uint8_t* data, size_t rembytes, int* offset)
 	return 0;
 }
 
-int extractpng(uint8_t* data, size_t rembytes, char* prefix, int* count)
+int extractpng(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 {
 	int offset = 8;
 	int outfd;
@@ -231,9 +235,16 @@ typedef struct jpegsofheader_t
 	uint8_t quanttable;
 } jpegsofheader;
 
-int readsegment(int outfd, uint8_t* data, size_t rembytes, int* offset)
+int readsegment(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 {
 	jfifsegment* seg;
+
+	if ( (rembytes - *offset) < 4 )
+	{
+		fprintf(stderr, "EOF reached before we found any image data.\n");
+		*offset = 1;	/* Probably not a real JPEG file */
+		return -1;
+	}
 
 	seg = (jfifsegment*)(data + *offset);
 
@@ -294,7 +305,7 @@ int readsegment(int outfd, uint8_t* data, size_t rembytes, int* offset)
 	return 0;	
 }
 
-int extractjfif(uint8_t* data, size_t rembytes, char* prefix, int* count)
+int extractjfif(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 {
 	int offset = 0;
 	int outfd;
@@ -304,6 +315,172 @@ int extractjfif(uint8_t* data, size_t rembytes, char* prefix, int* count)
 		return 1;
 
 	while ( readsegment(outfd, data, rembytes, &offset) == 0 )
+	{ }
+
+	close(outfd);
+
+	return offset;
+}
+
+uint32_t syncsafe_decode(uint8_t syncsafe[4])
+{
+	return (syncsafe[0] << 21) + 
+	       (syncsafe[1] << 14) +
+	       (syncsafe[2] << 7)  +
+	       (syncsafe[3]);
+}
+
+typedef struct id3v2_t
+{
+	char		id[3];
+	uint8_t		v_maj;
+	uint8_t		v_min;
+	uint8_t		flags;
+	uint8_t		ss_size[4];
+} id3v2;	
+
+/*
+typedef struct mp3_t
+{
+	unsigned int		sync:11;
+	unsigned int		vers:2;
+	unsigned int		layer:2;
+	unsigned int		protected:1;
+	unsigned int		bitrate:4;
+	unsigned int		samplerate:2;
+	unsigned int		padded:1;
+	unsigned int		private:1;
+	unsigned int		channels:2;
+	unsigned int		modeext:2;
+	unsigned int		copyright:1;
+	unsigned int		original:1;
+	unsigned int		emphasis:2;
+} mp3;
+*/
+
+typedef struct mp3_t
+{
+	unsigned int		emphasis:2;
+	unsigned int		original:1;
+	unsigned int		copyright:1;
+	unsigned int		modeext:2;
+	unsigned int		channels:2;
+	unsigned int		private:1;
+	unsigned int		padded:1;
+	unsigned int		samplerate:2;
+	unsigned int		bitrate:4;
+	unsigned int		protected:1;
+	unsigned int		layer:2;
+	unsigned int		vers:2;
+	unsigned int		sync:11;
+} mp3;
+
+int extractmp3frame(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
+{
+	mp3*		mp3head;
+
+	/* C bitfields are treacherous, since the header is in MSB form 
+	 * we need to convert it to LSB, but doing the conversion on the 
+	 * bitfields is too late.  We need to do it on the original data,
+	 * hence this mess.
+	 */
+	if ( (*offset + 4) > rembytes )
+		return -1;
+
+	uint32_t msbdata;
+	uint32_t lsbdata;
+	memcpy(&msbdata, data + *offset, 4);
+	lsbdata = ntohl(msbdata);
+	mp3head = (mp3*) &lsbdata;
+
+	if ( mp3head->sync != 0x7FF  || 
+	     mp3head->bitrate == 0   ||
+	     mp3head->bitrate == 0xf || 
+	     mp3head->samplerate == 0x3 )
+	{
+		fprintf(stderr, "MP3 header not found %x != %x, %d %d\n", mp3head->sync, 0x7FF, mp3head->bitrate, mp3head->samplerate);
+		return 1;
+	}
+
+	int bittable;
+	if ( mp3head->vers == 0x3 )
+		bittable = mp3head->layer - 1;
+	else if ( mp3head->vers == 0x2 )
+		bittable = mp3head->layer + 2;
+	else
+	{
+		fprintf(stderr, "MPEG version/layer combo not supported v.%d l.%d\n", mp3head->vers, mp3head->layer);
+		return 1;
+	}
+
+	uint32_t framelength;
+	framelength = (1440 * mp3bitrates[bittable][mp3head->bitrate]) / 
+			 mp3samplerates[mp3head->samplerate] + mp3head->padded;
+
+	write(outfd, data + *offset, framelength);
+
+	*offset += framelength;
+
+	printf("MP3 v.%d layer %d crc: %d bitrate: %d samplerate: %d, frame len: %d\n",
+			4 - mp3head->vers, 4 - mp3head->layer, 
+			1 - mp3head->protected,
+			mp3bitrates[bittable][mp3head->bitrate], 
+			mp3samplerates[mp3head->samplerate], 
+			framelength);
+
+	return 0;
+}
+
+int extractmp3(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
+{
+	id3v2*		id3head;
+	int		offset = 0;
+	uint32_t	size;
+	int		outfd = 0;
+
+	if ( data[0] == 'i' )
+	{
+
+		id3head = (id3v2*)data;
+
+		/* Apply some heuristics to avoid false positives.  There's no
+		 * checksum field or anything so we just have to look for 
+		 * weird/invalid data.  This isn't perfect and we will have some
+		 * false positives if the data is highly random and sparse.
+		 */
+		if ( id3head->v_maj > 5 || 
+			id3head->v_min > 4 ||
+			(id3head->flags & 0x0F ) != 0 ||
+			(id3head->ss_size[0] & 0x80) != 0 ||
+			(id3head->ss_size[1] & 0x80) != 0 ||
+			(id3head->ss_size[2] & 0x80) != 0 ||
+			(id3head->ss_size[3] & 0x80) != 0 ||
+			rembytes < 10)
+		{
+			return 1;
+		}
+
+		outfd = openoutfile(prefix, count, "mp3");
+		if ( outfd < 0 )
+			return 1;
+
+		size = syncsafe_decode(id3head->ss_size);
+
+		offset += size + 10;
+
+		printf("ID3v2.%d.%d (%d bytes)\n", id3head->v_maj, id3head->v_min, size);
+
+		write(outfd, data, size + 10);
+	}
+
+	if ( outfd == 0 )
+	{
+		outfd = openoutfile(prefix, count, "mp3");
+		if ( outfd < 0 )
+			return 1;
+	}
+
+	while ( extractmp3frame(outfd, data, rembytes, &offset) == 0 )
 	{ }
 
 	close(outfd);
@@ -361,6 +538,15 @@ int finddata(int fd, char* prefix, int* count)
 		{
 			lcv += extractjfif(&data[lcv], fileinfo.st_size - lcv, prefix, count);
 		}
+
+		if ((data[lcv]   == 'I' &&
+		     data[lcv+1] == 'D' &&
+		     data[lcv+2] == '3') ||
+		    (data[lcv]   == 0xFF &&
+		    (data[lcv+1] & 0xE0) == 0xE0) )
+		{
+			lcv += extractmp3(&data[lcv], fileinfo.st_size - lcv, prefix, count);
+		}
 	}
 
 	munmap(data, fileinfo.st_size);
@@ -384,6 +570,7 @@ int main(int argc, char** argv)
 
 	for ( lcv = 2; lcv < argc; lcv++ )
 	{
+		printf("%s\n", argv[lcv]);
 		fd = open(argv[lcv], O_RDONLY);
 
 		if ( fd < 0 )
