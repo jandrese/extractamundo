@@ -19,9 +19,6 @@ int openoutfile(char* prefix, int* count, char* extension)
 	char outname[PATH_MAX];
 	int outfd;
 
-	if ( *count > 10 )
-		exit(0);
-
 	sprintf(outname, "%s-%04d.%s", prefix, *count, extension);
 
 	*count += 1;
@@ -39,32 +36,47 @@ int openoutfile(char* prefix, int* count, char* extension)
 	return outfd;
 }
 
-
 typedef struct riffheader_t
 {
 	char		riff_fourcc[4];
 	uint32_t	filesize;
-	char		webp_fourcc[4];
+	char		content_fourcc[4];
 } riffheader;
 
-int extractwebp(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
+int extractriff(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 {
 	riffheader* head;
 	int outfd;
 	char outname[1024];
+	char ext[5];
 
 	head = (riffheader*)data;
 
 	if ( rembytes < 12 )
 		return 1;
 
-	if ( memcmp(head->webp_fourcc, "WEBP", 4) != 0 )
-		return 1;
-
 	if ( head->filesize + 8 > rembytes )
 		return 1;
 
-	outfd = openoutfile(prefix, count, "webp");
+	for ( int dignum = 0; dignum < 4; dignum++ )
+	{
+		char extdig = head->content_fourcc[dignum];
+
+		if ( ! isprint(extdig) && extdig != '\0' )
+			return 1;
+
+		/* Technically it's a violation of the RIFF 
+		 * spec to use whitespace in this part, but 
+		 * does that stop developers?  No.
+		 */
+		if ( isspace(extdig) )
+			extdig = '\0';
+
+		ext[dignum] = extdig;
+	}
+	ext[4] = '\0'';
+
+	outfd = openoutfile(prefix, count, ext);
 
 	if ( outfd < 0 )
 		return 1;
@@ -196,6 +208,9 @@ int readchunk(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 	return 0;
 }
 
+/* I would like to take a moment to show my appreciation for the PNG file
+ * format, which is exceptionally well designed and documented.
+ */
 int extractpng(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 {
 	int offset = 8;
@@ -339,25 +354,6 @@ typedef struct id3v2_t
 	uint8_t		ss_size[4];
 } id3v2;	
 
-/*
-typedef struct mp3_t
-{
-	unsigned int		sync:11;
-	unsigned int		vers:2;
-	unsigned int		layer:2;
-	unsigned int		protected:1;
-	unsigned int		bitrate:4;
-	unsigned int		samplerate:2;
-	unsigned int		padded:1;
-	unsigned int		private:1;
-	unsigned int		channels:2;
-	unsigned int		modeext:2;
-	unsigned int		copyright:1;
-	unsigned int		original:1;
-	unsigned int		emphasis:2;
-} mp3;
-*/
-
 typedef struct mp3_t
 {
 	unsigned int		emphasis:2;
@@ -480,6 +476,13 @@ int extractmp3(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 			return 1;
 	}
 
+	/* In a set of random bits the MP3 header is much too common.
+	 * A single header isn't really sufficient to assume that we
+	 * are looking at a valid MP3 file, especially without the
+	 * checksum.  So we require four valid MP3 headers in a row, 
+	 * two if the checksums are in use.
+	 */
+
 	while ( extractmp3frame(outfd, data, rembytes, &offset) == 0 )
 	{ }
 
@@ -505,6 +508,7 @@ int extractogg(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 	int offset = 0;
 	ogg* header;
 	uint32_t lastpage;
+	int outfd;
 
 	if ( rembytes < sizeof(ogg) )
 	{
@@ -565,6 +569,14 @@ int extractogg(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 		header = (ogg*)(data + offset);
 	}
 
+	outfd = openoutfile(prefix, count, "ogg");
+	if ( outfd < 0 )
+		return offset;
+
+	write(outfd, data, offset);
+
+	close(outfd);
+
 	return offset;
 }
 
@@ -595,7 +607,7 @@ int finddata(int fd, char* prefix, int* count)
 		     data[lcv+2] == 'F' &&
 		     data[lcv+3] == 'F' )
 		{
-			lcv += extractwebp(&data[lcv], fileinfo.st_size - lcv, prefix, count);
+			lcv += extractriff(&data[lcv], fileinfo.st_size - lcv, prefix, count);
 		}
 
 		if ( data[lcv]   == 0x89 &&
