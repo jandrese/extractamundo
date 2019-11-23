@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>
 #include <linux/limits.h>
 #include <sys/mman.h>
 #include <arpa/inet.h>
@@ -74,7 +75,7 @@ int extractriff(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 
 		ext[dignum] = extdig;
 	}
-	ext[4] = '\0'';
+	ext[4] = '\0';
 
 	outfd = openoutfile(prefix, count, ext);
 
