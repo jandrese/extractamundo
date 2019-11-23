@@ -488,6 +488,85 @@ int extractmp3(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 	return offset;
 }
 
+typedef struct __attribute__((__packed__)) ogg_t
+{
+	char		magic[4];
+	uint8_t		version;
+	uint8_t		type;
+	uint64_t	granuleposition;
+	uint32_t	serialnum;
+	uint32_t	pageseq;
+	uint32_t	crc;
+	uint8_t		numsegs;
+} ogg;
+
+int extractogg(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
+{
+	int offset = 0;
+	ogg* header;
+	uint32_t lastpage;
+
+	if ( rembytes < sizeof(ogg) )
+	{
+		fprintf(stderr, "Remaining space too small for an OGG file\n");
+		return 1;
+	}
+
+	header = (ogg*)data;
+
+	if ( memcmp(header->magic, "OggS", 4) != 0 )
+	{
+		fprintf(stderr, "Error: Not an OGG segment\n");
+		return 1;
+	}
+
+	if ( header->version != 0 )
+	{
+		fprintf(stderr, "Error: Only OGG version 1 containers are suported.  This is %d\n", header->version + 1);
+		return 1;
+	}
+
+	if ( header->type != 0x2 )
+	{
+		fprintf(stderr, "Warning: Did not see first packet of OGG bitstream\n");
+	}
+	lastpage = header->pageseq - 1;
+
+	while ( header->type != 0x4 )
+	{
+		if ( memcmp(header->magic, "OggS", 4) != 0 )
+		{
+			fprintf(stderr, "Error: Premature break in OGG sequence %x%x%x%x\n", header->magic[0], header->magic[1], header->magic[2], header->magic[3]);
+			return 1;
+		}
+
+		if ( header->pageseq != lastpage + 1 )
+		{
+			fprintf(stderr, "Warning: Break in page sequence, prev page: %u, curr page: %u\n", lastpage, header->pageseq);
+		}
+
+		lastpage = header->pageseq;
+
+		offset += sizeof(ogg);
+		uint8_t* segtable = data + offset;
+		offset += header->numsegs;
+
+		for ( int seg = 0; seg < header->numsegs; seg++ )
+		{
+			offset += segtable[seg];
+		}
+
+		if ( rembytes < sizeof(ogg) + offset )
+		{
+			fprintf(stderr, "OGG file truncated\n");
+			return 1;
+		}
+
+		header = (ogg*)(data + offset);
+	}
+
+	return offset;
+}
 
 int finddata(int fd, char* prefix, int* count)
 {
@@ -547,6 +626,14 @@ int finddata(int fd, char* prefix, int* count)
 		{
 			lcv += extractmp3(&data[lcv], fileinfo.st_size - lcv, prefix, count);
 		}
+
+		if (data[lcv]   == 'O' &&
+	 	    data[lcv+1] == 'g' &&
+		    data[lcv+2] == 'g' &&
+		    data[lcv+3] == 'S' )
+		{
+			lcv += extractogg(&data[lcv], fileinfo.st_size - lcv, prefix, count);
+		}	
 	}
 
 	munmap(data, fileinfo.st_size);
