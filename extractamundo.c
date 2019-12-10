@@ -15,16 +15,22 @@
 
 #define DEBUG 0
 
-int openoutfile(char* prefix, int* count, char* extension)
+typedef struct conf_t
+{
+	char*	prefix;
+	char*	sourcefile;
+	int	count;
+	char	comment[1024];
+} conf;
+
+int writeoutput(char* data, int size, conf* config, char* extension)
 {
 	char outname[PATH_MAX];
 	int outfd;
 
-	sprintf(outname, "%s-%04d.%s", prefix, *count, extension);
+	sprintf(outname, "%s-%04d.%s", config->prefix, config->count, extension);
 
-	*count += 1;
-
-	printf("%s: ", outname);
+	config->count += 1;
 
 	outfd = open(outname, O_CREAT | O_WRONLY, 0644);
 
@@ -34,7 +40,26 @@ int openoutfile(char* prefix, int* count, char* extension)
 		return -1;
 	}
 
-	return outfd;
+	printf("%s: (%d bytes)\n", outname, size);
+
+	int written = 0;
+	while ( written < size )
+	{
+		int lastwrite = write(outfd, data + written, size - written);
+
+		if ( lastwrite <= 0 )
+		{
+			perror("write");
+			close(outfd);
+			return -1;
+		}
+
+		written += lastwrite;	
+	}
+
+	close(outfd);
+
+	return 0;
 }
 
 typedef struct riffheader_t
@@ -44,11 +69,9 @@ typedef struct riffheader_t
 	char		content_fourcc[4];
 } riffheader;
 
-int extractriff(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
+int extractriff(uint8_t* data, ssize_t rembytes, conf* config)
 {
 	riffheader* head;
-	int outfd;
-	char outname[1024];
 	char ext[5];
 
 	head = (riffheader*)data;
@@ -73,20 +96,14 @@ int extractriff(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 		if ( isspace(extdig) )
 			extdig = '\0';
 
+		extdig = tolower(extdig);
+
 		ext[dignum] = extdig;
 	}
 	ext[4] = '\0';
 
-	outfd = openoutfile(prefix, count, ext);
-
-	if ( outfd < 0 )
+	if ( writeoutput((char*)data, head->filesize + 8, config, ext) < 0 )
 		return 1;
-
-	write(outfd, data, head->filesize + 8);
-
-	close(outfd);
-
-	printf("%s: %d bytes\n", outname, head->filesize + 8);
 
 	return head->filesize + 8;
 }
@@ -128,7 +145,7 @@ unsigned long pngcrc(unsigned char *buf, int len)
 	return update_crc(0xffffffffL, buf, len) ^ 0xffffffffL;
 }
 
-int readchunk(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
+int readpngchunk(uint8_t* data, ssize_t rembytes, int* offset)
 {
 	pngchunk* chunkheader;
 	size_t	chunklen;
@@ -193,12 +210,6 @@ int readchunk(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 		return -1;
 	}
 
-	if( write(outfd, data + *offset, chunklen) < chunklen )
-	{
-		fprintf(stderr, "Warning: short write of PNG chunk, output file corrupt\n");
-		return -1;
-	}
-
 	*offset += chunklen;
 
 	if ( strncasecmp(chunkheader->type, "IEND", 4) == 0 )
@@ -212,23 +223,21 @@ int readchunk(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 /* I would like to take a moment to show my appreciation for the PNG file
  * format, which is exceptionally well designed and documented.
  */
-int extractpng(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
+int extractpng(uint8_t* data, ssize_t rembytes, conf* config)
 {
 	int offset = 8;
-	int outfd;
+	int ret;
 
-	outfd = openoutfile(prefix, count, "png");
-	if ( outfd < 0 )
-		return 1;
-
-	write(outfd, data, 8);	/* PNG header */
-	
-	while ( readchunk(outfd, data, rembytes, &offset) == 0 )
+	while ( (ret = readpngchunk(data, rembytes, &offset)) == 0 )
 	{ }
 
-	close(outfd);
+	if ( ret < 0 )
+	{
+		fprintf(stderr, "PNG Decode failed\n");
+		return 1;
+	}
 
-	printf(" %d bytes\n", offset);
+	writeoutput((char*)data, offset, config, "png");
 
 	return offset;
 }
@@ -251,7 +260,7 @@ typedef struct jpegsofheader_t
 	uint8_t quanttable;
 } jpegsofheader;
 
-int readsegment(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
+int readjfifsegment(uint8_t* data, ssize_t rembytes, int* offset)
 {
 	jfifsegment* seg;
 
@@ -266,22 +275,20 @@ int readsegment(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 
 	if ( seg->magic != 0xff )
 	{
-		printf("Segment header incorrect\n");
+		if ( DEBUG )
+			printf("JFIF Segment header incorrect, file corrupt or not a JPEG\n");
 		return -1;
 	}
 
 	if ( seg->app0 == 0xd8 )
 	{
-		write(outfd, data + *offset, 2);
 		*offset += 2;
 		return 0;
 	}
 
 	if ( seg->app0 == 0xd9 )
 	{
-		write(outfd, data + *offset, 2);
 		*offset += 2;
-		printf(" (%d bytes)\n", *offset);
 		return 1;
 	}
 
@@ -290,7 +297,7 @@ int readsegment(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 		jpegsofheader* sof;
 
 		sof = (jpegsofheader*)(data + *offset + 3);
-		printf("%d x %d", ntohs(sof->width), ntohs(sof->height));
+		printf("JPEG Image %d x %d ", ntohs(sof->width), ntohs(sof->height));
 	}
 
 	// Unfortunately JPEG doesn't provide a way to determine the
@@ -304,8 +311,8 @@ int readsegment(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 			if ( data[*offset] == 0xff &&
 			     data[*offset+1] == 0xd9 )
 			{
-				write(outfd, data + startoff, *offset - startoff);
-				return 0;
+				*offset += 2;
+				return 1;
 			}
 		}
 		*offset = startoff + 1;
@@ -313,27 +320,25 @@ int readsegment(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 		return -1;
 	}
 
-
-	uint16_t len = ntohs(seg->length);
-	write(outfd, data + *offset, len + 2);
-	*offset += len + 2;
-
-	return 0;	
+	/* Any other kind of marker we assume is just an application marker 
+	 * of some kind.
+	 */
+	*offset += ntohs(seg->length) + 2;
+	return 0;
 }
 
-int extractjfif(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
+int extractjfif(uint8_t* data, ssize_t rembytes, conf* config)
 {
 	int offset = 0;
-	int outfd;
+	int ret;
 
-	outfd = openoutfile(prefix, count, "jpg");
-	if ( outfd < 0 )
-		return 1;
+	while ((ret = readjfifsegment(data, rembytes, &offset)) == 0 )
+	{
+		if ( ret < 0 )
+			return 1;
+	}
 
-	while ( readsegment(outfd, data, rembytes, &offset) == 0 )
-	{ }
-
-	close(outfd);
+	writeoutput((char*)data, offset, config, "jpg");
 
 	return offset;
 }
@@ -346,7 +351,33 @@ uint32_t syncsafe_decode(uint8_t syncsafe[4])
 	       (syncsafe[3]);
 }
 
-typedef struct id3v2_t
+typedef struct __attribute__((__packed__)) id3v1_t
+{
+	char		header[3];
+	char		title[30];
+	char		artist[30];
+	char		album[30];
+	char		year[4];
+	char		comment[28];
+	char		tracknumflag;
+	char		tracknum;
+	char		genre;
+} id3v1;
+
+typedef struct __attribute__((__packed__)) id3v1_extended_t
+{
+	char		header[4];
+	char		title[60];
+	char		artist[60];
+	char		album[60];
+	char		speed;
+	char		genre[30];
+	char		starttime[6];
+	char		endtime[6];
+} id3v1_extended;
+
+
+typedef struct __attribute__((__packed__)) id3v2_t
 {
 	char		id[3];
 	uint8_t		v_maj;
@@ -395,7 +426,8 @@ int extractmp3frame(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 	     mp3head->bitrate == 0xf || 
 	     mp3head->samplerate == 0x3 )
 	{
-		fprintf(stderr, "MP3 header not found %x != %x, %d %d\n", mp3head->sync, 0x7FF, mp3head->bitrate, mp3head->samplerate);
+		if ( DEBUG )
+			fprintf(stderr, "MP3 header not found %x != %x, %d %d\n", mp3head->sync, 0x7FF, mp3head->bitrate, mp3head->samplerate);
 		return 1;
 	}
 
@@ -406,7 +438,8 @@ int extractmp3frame(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 		bittable = mp3head->layer + 2;
 	else
 	{
-		fprintf(stderr, "MPEG version/layer combo not supported v.%d l.%d\n", mp3head->vers, mp3head->layer);
+		if ( DEBUG )
+			fprintf(stderr, "MPEG version/layer combo not supported v.%d l.%d\n", mp3head->vers, mp3head->layer);
 		return 1;
 	}
 
@@ -418,7 +451,8 @@ int extractmp3frame(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 
 	*offset += framelength;
 
-	printf("MP3 v.%d layer %d crc: %d bitrate: %d samplerate: %d, frame len: %d\n",
+	if ( DEBUG )
+		printf("MP3 v.%d layer %d crc: %d bitrate: %d samplerate: %d, frame len: %d\n",
 			4 - mp3head->vers, 4 - mp3head->layer, 
 			1 - mp3head->protected,
 			mp3bitrates[bittable][mp3head->bitrate], 
@@ -428,16 +462,15 @@ int extractmp3frame(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 	return 0;
 }
 
-int extractmp3(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
+int extractmp3(uint8_t* data, ssize_t rembytes, conf* config)
 {
-	id3v2*		id3head;
 	int		offset = 0;
 	uint32_t	size;
 	int		outfd = 0;
 
 	if ( data[0] == 'i' )
 	{
-
+		id3v2*		id3head;
 		id3head = (id3v2*)data;
 
 		/* Apply some heuristics to avoid false positives.  There's no
@@ -457,37 +490,65 @@ int extractmp3(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 			return 1;
 		}
 
-		outfd = openoutfile(prefix, count, "mp3");
-		if ( outfd < 0 )
-			return 1;
-
 		size = syncsafe_decode(id3head->ss_size);
 
 		offset += size + 10;
 
-		printf("ID3v2.%d.%d (%d bytes)\n", id3head->v_maj, id3head->v_min, size);
-
-		write(outfd, data, size + 10);
-	}
-
-	if ( outfd == 0 )
-	{
-		outfd = openoutfile(prefix, count, "mp3");
-		if ( outfd < 0 )
+		/* Not followed by an MP3 header? */
+		if ( data[offset] != 0xff || ((data[offset+1] & 0xE0) != 0xE0))
+		{
+			if ( DEBUG )
+				fprintf(stderr, "Error: ID3v2 tag not followed by MP3 frame\n");
 			return 1;
+		}
 	}
 
-	/* In a set of random bits the MP3 header is much too common.
-	 * A single header isn't really sufficient to assume that we
-	 * are looking at a valid MP3 file, especially without the
-	 * checksum.  So we require four valid MP3 headers in a row, 
-	 * two if the checksums are in use.
-	 */
-
+	int numframes = 0;
 	while ( extractmp3frame(outfd, data, rembytes, &offset) == 0 )
-	{ }
+	{
+		numframes++;	
+	}
+	
+	/* Yes the extended tag magic number is almost identical to the
+	 * regular tag magic number, and an  extended tag could just be 
+	 * a regular tag if the song title starts with a + character.  
+	 * ID3 is kind of dumb.
+	 */
+	if ( data[offset]   == 'T' &&
+	     data[offset+1] == 'A' &&
+	     data[offset+2] == 'G' &&
+	     data[offset+3] == '+' )
+	{
+		id3v1_extended* tag;
+		tag = (id3v1_extended*) (data + offset);
 
-	close(outfd);
+		offset += sizeof(id3v1_extended);
+	}
+
+	if ( data[offset]   == 'T' &&
+	     data[offset+1] == 'A' &&
+	     data[offset+2] == 'G' )
+	{
+		/* ID3v1 tag */
+		id3v1*	tag;
+		tag = (id3v1*)(data + offset);
+
+		offset += sizeof(id3v1);
+	}
+	else if ( numframes < 5 ) 
+	{
+		/* With only a small number of frames and no ID3 tag 
+		 * this is probably not an MP3 file.  MP3's file format
+		 * is very loose and the optional checksum is apparently
+		 * almost never used, so the false positive rate is very high.
+		 * This huristic gets the false positive rate down to a
+		 * manageable level, and there's probably not a lot of
+		 * interest in MP3 files that are less than a second long.
+		 */
+		return 1;
+	}
+
+	writeoutput((char*)data, offset, config, "mp3");
 
 	return offset;
 }
@@ -504,12 +565,11 @@ typedef struct __attribute__((__packed__)) ogg_t
 	uint8_t		numsegs;
 } ogg;
 
-int extractogg(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
+int extractogg(uint8_t* data, ssize_t rembytes, conf* config)
 {
 	int offset = 0;
 	ogg* header;
 	uint32_t lastpage;
-	int outfd;
 
 	if ( rembytes < sizeof(ogg) )
 	{
@@ -570,18 +630,12 @@ int extractogg(uint8_t* data, ssize_t rembytes, char* prefix, int* count)
 		header = (ogg*)(data + offset);
 	}
 
-	outfd = openoutfile(prefix, count, "ogg");
-	if ( outfd < 0 )
-		return offset;
-
-	write(outfd, data, offset);
-
-	close(outfd);
+	writeoutput((char*)data, offset, config, "ogg");
 
 	return offset;
 }
 
-int finddata(int fd, char* prefix, int* count)
+int finddata(int fd, conf* config)
 {
 	struct stat fileinfo;
 	uint8_t* data;
@@ -601,17 +655,17 @@ int finddata(int fd, char* prefix, int* count)
 		return -1;
 	}
 
-	for ( lcv = 0; lcv < (fileinfo.st_size - 8); lcv++ )
+	lcv = 0;
+	while ( lcv < (fileinfo.st_size - 8) )
 	{
 		if ( data[lcv]   == 'R' &&
 		     data[lcv+1] == 'I' &&
 		     data[lcv+2] == 'F' &&
 		     data[lcv+3] == 'F' )
 		{
-			lcv += extractriff(&data[lcv], fileinfo.st_size - lcv, prefix, count);
+			lcv += extractriff(&data[lcv], fileinfo.st_size - lcv, config);
 		}
-
-		if ( data[lcv]   == 0x89 &&
+		else if ( data[lcv]   == 0x89 &&
 		     data[lcv+1] == 'P'  &&
 		     data[lcv+2] == 'N'  &&
 		     data[lcv+3] == 'G'  &&
@@ -620,33 +674,34 @@ int finddata(int fd, char* prefix, int* count)
 		     data[lcv+6] == 0x1a &&
 		     data[lcv+7] == '\n' )
 		{
-			lcv += extractpng(&data[lcv], fileinfo.st_size - lcv, prefix, count);
+			lcv += extractpng(&data[lcv], fileinfo.st_size - lcv, config);
 		}
-
-		if ( data[lcv]   == 0xff &&
+		else if ( data[lcv]   == 0xff &&
 		     data[lcv+1] == 0xd8 &&
 		     data[lcv+2] == 0xff &&
 		     (data[lcv+3] & 0xf0) == 0xe0 )
 		{
-			lcv += extractjfif(&data[lcv], fileinfo.st_size - lcv, prefix, count);
+			lcv += extractjfif(&data[lcv], fileinfo.st_size - lcv, config);
 		}
-
-		if ((data[lcv]   == 'I' &&
+		else if ((data[lcv]   == 'I' &&
 		     data[lcv+1] == 'D' &&
 		     data[lcv+2] == '3') ||
 		    (data[lcv]   == 0xFF &&
 		    (data[lcv+1] & 0xE0) == 0xE0) )
 		{
-			lcv += extractmp3(&data[lcv], fileinfo.st_size - lcv, prefix, count);
+			lcv += extractmp3(&data[lcv], fileinfo.st_size - lcv, config);
 		}
-
-		if (data[lcv]   == 'O' &&
+		else if (data[lcv]   == 'O' &&
 	 	    data[lcv+1] == 'g' &&
 		    data[lcv+2] == 'g' &&
 		    data[lcv+3] == 'S' )
 		{
-			lcv += extractogg(&data[lcv], fileinfo.st_size - lcv, prefix, count);
+			lcv += extractogg(&data[lcv], fileinfo.st_size - lcv, config);
 		}	
+		else
+		{
+			lcv++;
+		}
 	}
 
 	munmap(data, fileinfo.st_size);
@@ -658,9 +713,11 @@ int main(int argc, char** argv)
 {
 	int fd;
 	int lcv;
-	int count;
+	conf config;
 
-	count = 1;
+	config.count = 1;
+	config.prefix = argv[1];
+	config.comment[0] = '\0';
 
 	if ( argc < 3 || strcmp(argv[1], "-h") == 0 )
 	{
@@ -670,7 +727,8 @@ int main(int argc, char** argv)
 
 	for ( lcv = 2; lcv < argc; lcv++ )
 	{
-		printf("%s\n", argv[lcv]);
+		printf("Extracting from %s\n", argv[lcv]);
+		config.sourcefile = argv[lcv];
 		fd = open(argv[lcv], O_RDONLY);
 
 		if ( fd < 0 )
@@ -679,7 +737,7 @@ int main(int argc, char** argv)
 			continue;
 		}
 
-		finddata(fd, argv[1], &count);
+		finddata(fd, &config);
 
 		close(fd);
 	}
