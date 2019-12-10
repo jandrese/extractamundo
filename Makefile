@@ -1,5 +1,5 @@
 CC=clang
-CFLAGS=-pedantic -Wall -g --std=c11 -Wno-zero-length-array
+CFLAGS=-pedantic -Wall -g --std=c11
 BIN=extractamundo
 
 all: ${BIN}
