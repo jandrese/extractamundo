@@ -403,7 +403,7 @@ typedef struct mp3_t
 	unsigned int		sync:11;
 } mp3;
 
-int extractmp3frame(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
+int extractmp3frame(uint8_t* data, ssize_t rembytes, int* offset)
 {
 	mp3*		mp3head;
 
@@ -447,8 +447,6 @@ int extractmp3frame(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 	framelength = (1440 * mp3bitrates[bittable][mp3head->bitrate]) / 
 			 mp3samplerates[mp3head->samplerate] + mp3head->padded;
 
-	write(outfd, data + *offset, framelength);
-
 	*offset += framelength;
 
 	if ( DEBUG )
@@ -459,6 +457,13 @@ int extractmp3frame(int outfd, uint8_t* data, ssize_t rembytes, int* offset)
 			mp3samplerates[mp3head->samplerate], 
 			framelength);
 
+	/* XXX: I should do the Checksum calculation here if it is present
+	 * in the file, but I have not been able to find an example file 
+	 * with the checksums enabled to test with, nor a good document
+	 * describing how the checksum is calculated.  I suspect these two
+	 * facts may be related.
+	 */
+
 	return 0;
 }
 
@@ -466,7 +471,6 @@ int extractmp3(uint8_t* data, ssize_t rembytes, conf* config)
 {
 	int		offset = 0;
 	uint32_t	size;
-	int		outfd = 0;
 
 	if ( data[0] == 'i' )
 	{
@@ -504,7 +508,7 @@ int extractmp3(uint8_t* data, ssize_t rembytes, conf* config)
 	}
 
 	int numframes = 0;
-	while ( extractmp3frame(outfd, data, rembytes, &offset) == 0 )
+	while ( extractmp3frame(data, rembytes, &offset) == 0 )
 	{
 		numframes++;	
 	}
