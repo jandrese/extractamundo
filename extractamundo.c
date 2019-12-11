@@ -13,12 +13,17 @@
 #include "pngcrctable.h"
 #include "mp3tables.h"
 
-#define DEBUG 0
-
 typedef struct conf_t
 {
 	char*	prefix;
+	char*	extractdir;
 	char*	sourcefile;
+	int	debuglevel;
+	int	overwritemode;
+	int	dumpunknown;
+	int	zeropad;
+	char	padcharacter;
+	int	recursivemode;
 	int	count;
 	char	comment[1024];
 } conf;
@@ -159,7 +164,7 @@ int readpngchunk(uint8_t* data, ssize_t rembytes, int* offset)
 	 */
 	chunklen = ntohl(chunkheader->length) + 4 + 4 + 4;
 	
-	if ( DEBUG )
+	if ( config->debuglevel >= 2 )
 		printf("%c%c%c%c %lu bytes\n", 
 			     chunkheader->type[0], chunkheader->type[1],
 			     chunkheader->type[2], chunkheader->type[3],
@@ -275,7 +280,7 @@ int readjfifsegment(uint8_t* data, ssize_t rembytes, int* offset)
 
 	if ( seg->magic != 0xff )
 	{
-		if ( DEBUG )
+		if ( config->debuglevel >= 1 )
 			printf("JFIF Segment header incorrect, file corrupt or not a JPEG\n");
 		return -1;
 	}
@@ -426,7 +431,7 @@ int extractmp3frame(uint8_t* data, ssize_t rembytes, int* offset)
 	     mp3head->bitrate == 0xf || 
 	     mp3head->samplerate == 0x3 )
 	{
-		if ( DEBUG )
+		if ( config->debuglevel >= 2 )
 			fprintf(stderr, "MP3 header not found %x != %x, %d %d\n", mp3head->sync, 0x7FF, mp3head->bitrate, mp3head->samplerate);
 		return 1;
 	}
@@ -438,7 +443,7 @@ int extractmp3frame(uint8_t* data, ssize_t rembytes, int* offset)
 		bittable = mp3head->layer + 2;
 	else
 	{
-		if ( DEBUG )
+		if ( config->debuglevel >= 2 )
 			fprintf(stderr, "MPEG version/layer combo not supported v.%d l.%d\n", mp3head->vers, mp3head->layer);
 		return 1;
 	}
@@ -449,7 +454,7 @@ int extractmp3frame(uint8_t* data, ssize_t rembytes, int* offset)
 
 	*offset += framelength;
 
-	if ( DEBUG )
+	if ( config->debuglevel >= 1 )
 		printf("MP3 v.%d layer %d crc: %d bitrate: %d samplerate: %d, frame len: %d\n",
 			4 - mp3head->vers, 4 - mp3head->layer, 
 			1 - mp3head->protected,
@@ -501,7 +506,7 @@ int extractmp3(uint8_t* data, ssize_t rembytes, conf* config)
 		/* Not followed by an MP3 header? */
 		if ( data[offset] != 0xff || ((data[offset+1] & 0xE0) != 0xE0))
 		{
-			if ( DEBUG )
+			if ( config->debuglevel >= 1 )
 				fprintf(stderr, "Error: ID3v2 tag not followed by MP3 frame\n");
 			return 1;
 		}
@@ -717,19 +722,59 @@ int main(int argc, char** argv)
 {
 	int fd;
 	int lcv;
+	int opt;
 	conf config;
 
+	memset(&config, 0, sizeof(conf));
+
 	config.count = 1;
-	config.prefix = argv[1];
-	config.comment[0] = '\0';
+	config.extractdir = "extracted";
 
-	if ( argc < 3 || strcmp(argv[1], "-h") == 0 )
+	while (( opt = getopt(argc, argv, "e:dp:ouzc:rh")) != -1 )
 	{
-		printf("Usage: %s <prefix> <file to extract>...\n", argv[0]);
-		return 0;
-	}	
+		switch(opt)
+		{
+		case 'e':
+			config.extractdir = optarg;
+		break;
 
-	for ( lcv = 2; lcv < argc; lcv++ )
+		case 'd':
+			config.debuglevel++;
+		break;
+
+		case 'p':
+			config.prefix = optarg;
+		break;
+
+		case 'o':
+			config.overwritemode = 1;
+		break;
+		
+		case 'u':
+			config.dumpunknown = 1;
+		break;
+
+		case 'z':
+			config.zeropad = 1;
+		break;
+
+		case 'c':
+			config.padcharacter = *optarg;
+		break;
+
+		case 'r':
+			config.recursivemove = 1;
+		break;
+
+		case 'h':
+		default:
+			printhelp();
+			return(-1);
+		break;
+		}
+	}
+
+	for ( lcv = optind; lcv < argc; lcv++ )
 	{
 		printf("Extracting from %s\n", argv[lcv]);
 		config.sourcefile = argv[lcv];
