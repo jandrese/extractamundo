@@ -1,15 +1,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
-#include <linux/limits.h>
+#include <getopt.h>
+#include <errno.h>
+#include <sys/types.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <arpa/inet.h>
+#include <linux/limits.h>
 #include "pngcrctable.h"
 #include "mp3tables.h"
 
@@ -150,7 +153,7 @@ unsigned long pngcrc(unsigned char *buf, int len)
 	return update_crc(0xffffffffL, buf, len) ^ 0xffffffffL;
 }
 
-int readpngchunk(uint8_t* data, ssize_t rembytes, int* offset)
+int readpngchunk(uint8_t* data, ssize_t rembytes, int* offset, conf* config)
 {
 	pngchunk* chunkheader;
 	size_t	chunklen;
@@ -233,7 +236,7 @@ int extractpng(uint8_t* data, ssize_t rembytes, conf* config)
 	int offset = 8;
 	int ret;
 
-	while ( (ret = readpngchunk(data, rembytes, &offset)) == 0 )
+	while ( (ret = readpngchunk(data, rembytes, &offset, config)) == 0 )
 	{ }
 
 	if ( ret < 0 )
@@ -265,7 +268,7 @@ typedef struct jpegsofheader_t
 	uint8_t quanttable;
 } jpegsofheader;
 
-int readjfifsegment(uint8_t* data, ssize_t rembytes, int* offset)
+int readjfifsegment(uint8_t* data, ssize_t rembytes, int* offset, conf* config)
 {
 	jfifsegment* seg;
 
@@ -337,7 +340,7 @@ int extractjfif(uint8_t* data, ssize_t rembytes, conf* config)
 	int offset = 0;
 	int ret;
 
-	while ((ret = readjfifsegment(data, rembytes, &offset)) == 0 )
+	while ((ret = readjfifsegment(data, rembytes, &offset, config)) == 0 )
 	{
 		if ( ret < 0 )
 			return 1;
@@ -408,7 +411,7 @@ typedef struct mp3_t
 	unsigned int		sync:11;
 } mp3;
 
-int extractmp3frame(uint8_t* data, ssize_t rembytes, int* offset)
+int extractmp3frame(uint8_t* data, ssize_t rembytes, int* offset, conf* config)
 {
 	mp3*		mp3head;
 
@@ -513,7 +516,7 @@ int extractmp3(uint8_t* data, ssize_t rembytes, conf* config)
 	}
 
 	int numframes = 0;
-	while ( extractmp3frame(data, rembytes, &offset) == 0 )
+	while ( extractmp3frame(data, rembytes, &offset, config) == 0 )
 	{
 		numframes++;	
 	}
@@ -644,6 +647,41 @@ int extractogg(uint8_t* data, ssize_t rembytes, conf* config)
 	return offset;
 }
 
+int check_createdir(char* dir)
+{
+	struct stat info;
+	int ret;
+
+	ret = stat(dir, &info);
+
+	if ( ret < 0 && errno == ENOENT )
+	{
+		ret = mkdir(dir, 0755);
+
+		if ( ret < 0 )
+		{
+			fprintf(stderr, "mkdir: ");
+			perror(dir);
+			exit(-1);
+		}
+	}
+
+	if ( ret < 0 )
+	{
+		fprintf(stderr, "stat: ");
+		perror(dir);
+		exit(-1);
+	}
+
+	if ( S_ISDIR(info.st_mode) )
+	{
+		fprintf(stderr, "Error, extract directory '%s' already exists and is not a directory.  Use the -e option to choose a different directory\n", dir);
+		exit(-1);
+	}
+
+	return 0;
+}
+
 int finddata(int fd, conf* config)
 {
 	struct stat fileinfo;
@@ -718,6 +756,15 @@ int finddata(int fd, conf* config)
 	return 0;
 }
 
+int printhelp()
+{
+	printf("Extractamundo -- Pulls known file types out of aggregate files\n");
+	printf("\n");
+	printf("Files are written to a directory you specify, by default 'extracted'\n");
+
+	return 0;
+}
+
 int main(int argc, char** argv)
 {
 	int fd;
@@ -763,7 +810,7 @@ int main(int argc, char** argv)
 		break;
 
 		case 'r':
-			config.recursivemove = 1;
+			config.recursivemode = 1;
 		break;
 
 		case 'h':
@@ -773,6 +820,8 @@ int main(int argc, char** argv)
 		break;
 		}
 	}
+
+	check_createdir(config.extractdir);
 
 	for ( lcv = optind; lcv < argc; lcv++ )
 	{
